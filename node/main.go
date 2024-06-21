@@ -113,6 +113,11 @@ var (
 		0,
 		"specifies the parent process pid for a data worker",
 	)
+	integrityCheck = flag.Bool(
+		"integrity-check",
+		false,
+		"runs an integrity check on the store, helpful for confirming backups are not corrupted (defaults to false)",
+	)
 )
 
 var signatories = []string{
@@ -402,7 +407,10 @@ func main() {
 	}
 
 	fmt.Println("Loading ceremony state and starting node...")
-	go spawnDataWorkers(nodeConfig)
+
+	if !*integrityCheck {
+		go spawnDataWorkers(nodeConfig)
+	}
 
 	kzg.Init()
 
@@ -420,6 +428,13 @@ func main() {
 
 	if err != nil {
 		panic(err)
+	}
+
+	if *integrityCheck {
+		fmt.Println("Running integrity check...")
+		node.VerifyProofIntegrity()
+		fmt.Println("Integrity check passed!")
+		return
 	}
 
 	repair(*configDirectory, node)
@@ -477,20 +492,25 @@ func spawnDataWorkers(nodeConfig *config.Config) {
 	for i := 1; i <= cores-1; i++ {
 		i := i
 		go func() {
-			args := []string{
-				fmt.Sprintf("--core=%d", i),
-				fmt.Sprintf("--parent-process=%d", os.Getpid()),
-			}
-			args = append(args, os.Args[1:]...)
-			cmd := exec.Command(process, args...)
-			cmd.Stdout = os.Stdout
-			cmd.Stderr = os.Stdout
-			err := cmd.Start()
-			if err != nil {
-				panic(err)
-			}
+			for {
+				args := []string{
+					fmt.Sprintf("--core=%d", i),
+					fmt.Sprintf("--parent-process=%d", os.Getpid()),
+				}
+				args = append(args, os.Args[1:]...)
+				cmd := exec.Command(process, args...)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stdout
+				err := cmd.Start()
+				if err != nil {
+					panic(err)
+				}
 
-			dataWorkers[i-1] = cmd
+				dataWorkers[i-1] = cmd
+				cmd.Wait()
+				time.Sleep(25 * time.Millisecond)
+				fmt.Printf("Data worker %d stopped, restarting...\n", i)
+			}
 		}()
 	}
 }
@@ -504,56 +524,6 @@ func stopDataWorkers() {
 				dataWorkers[i].Process.Pid,
 			)
 		}
-	}
-}
-
-func RunMigrationIfNeeded(
-	configDir string,
-	nodeConfig *config.Config,
-) {
-	shouldMigrate := false
-	migrationInfo := []byte{0x00, 0x00, 0x00}
-	_, err := os.Stat(filepath.Join(configDir, "MIGRATIONS"))
-	if err != nil && os.IsNotExist(err) {
-		fmt.Println("Migrations file not found, will perform migration...")
-		shouldMigrate = true
-	}
-
-	if !shouldMigrate {
-		migrationInfo, err = os.ReadFile(filepath.Join(configDir, "MIGRATIONS"))
-		if err != nil {
-			panic(err)
-		}
-
-		if len(migrationInfo) < 3 ||
-			!bytes.Equal(migrationInfo, []byte{0x01, 0x04, 0x013}) {
-			fmt.Println("Migrations file outdated, will perform migration...")
-			shouldMigrate = true
-		}
-	}
-
-	// If subsequent migrations arise, we will need to distinguish by version
-	if shouldMigrate {
-		fmt.Println("Running migration...")
-
-		// Easiest migration in the world.
-		err := os.RemoveAll(filepath.Join(configDir, "store"))
-		if err != nil {
-			fmt.Println("ERROR: Could not remove store, please be sure to do this before restarting the node.")
-			panic(err)
-		}
-
-		err = os.WriteFile(
-			filepath.Join(configDir, "MIGRATIONS"),
-			[]byte{0x01, 0x04, 0x13},
-			fs.FileMode(0600),
-		)
-		if err != nil {
-			fmt.Println("ERROR: Could not save migration file.")
-			panic(err)
-		}
-
-		fmt.Println("Migration completed.")
 	}
 }
 
@@ -962,5 +932,5 @@ func printVersion() {
 		patchString = fmt.Sprintf("-p%d", patch)
 	}
 	fmt.Println(" ")
-	fmt.Println("                     Quilibrium Node - v" + config.GetVersionString() + patchString + " – Betelgeuse")
+	fmt.Println("                      Quilibrium Node - v" + config.GetVersionString() + patchString + " – Solstice")
 }
